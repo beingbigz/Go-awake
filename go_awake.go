@@ -53,9 +53,9 @@ var DEFAULT_SHUTDOWN_TIMER = time.Duration(0)
 
 // Windows API constants
 const (
-	ES_CONTINUOUS       = 0x80000000
-	ES_SYSTEM_REQUIRED  = 0x00000001
-	ES_DISPLAY_REQUIRED = 0x00000002
+	ES_CONTINUOUS       uint32 = 0x80000000
+	ES_SYSTEM_REQUIRED  uint32 = 0x00000001
+	ES_DISPLAY_REQUIRED uint32 = 0x00000002
 )
 
 // Global state
@@ -88,13 +88,15 @@ func main() {
 	exitCh = make(chan struct{})
 	trayReady = make(chan struct{})
 
-	// Setup interrupt handling
+	// Setup interrupt handling, but ignore SIGINT and SIGTERM to make the app harder to kill
 	signalCh := make(chan os.Signal, 1)
 	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		<-signalCh
-		cleanup()
-		os.Exit(0)
+		for {
+			sig := <-signalCh
+			log.Printf("Received signal %v, ignoring to prevent shutdown.", sig)
+			// Optionally, show a notification or log the attempt
+		}
 	}()
 
 	// Initialize with default settings
@@ -105,11 +107,18 @@ func main() {
 	// Sync startup state with registry
 	syncStartupState()
 
-	// Start the system tray
-	go systray.Run(onReady, onExit)
+	// Start the system tray (must be on main thread for reliability)
+	systray.Run(onReady, onExit)
 
 	// Wait for the tray to be ready
 	<-trayReady
+	// Handle Windows Explorer restarts (recreate tray icon)
+	go func() {
+		for {
+			time.Sleep(10 * time.Second)
+			systray.SetIcon(createIcon())
+		}
+	}()
 
 	// Apply default shutdown timer if set
 	if DEFAULT_SHUTDOWN_TIMER > 0 {
@@ -119,6 +128,14 @@ func main() {
 	// Keep the system awake initially if default is set to true
 	if DEFAULT_KEEP_AWAKE {
 		keepSystemAwake()
+		// Wait for tray to be ready, then update tray title to reflect awake state
+		go func() {
+			<-trayReady
+			// Use systray API to update menu title for system status
+			systray.SetTitle("Keep Awake")
+			// Optionally, trigger a custom update function if needed
+			updateTrayTitle()
+		}()
 	}
 
 	// Wait for exit signal
@@ -149,6 +166,13 @@ func onReady() {
 	// Add separator and quit menu
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit this software", "Exit the application")
+
+	// 如果默认需要保持唤醒，初始化后立即设置状态并刷新菜单
+	if DEFAULT_KEEP_AWAKE && !isAwake {
+		keepSystemAwake()
+		mSystem.SetTitle(fmt.Sprintf("System (current status: %s)", getSystemStatusText()))
+		updateTrayTitle()
+	}
 
 	// Signal that tray is ready
 	close(trayReady)
